@@ -153,65 +153,70 @@ inline int initSession(int s, const RPCDefs& rpcds) {
   return s;
 }
 
-inline int makeConnection(int s, sockaddr* saddr, size_t len) {
-  if (connect(s, saddr, len) == -1) {
-    std::ostringstream ss;
-    ss << "Unable to connect socket: " << strerror(errno) << std::flush;
-    close(s);
-    throw std::runtime_error(ss.str());
+inline addrinfo* lookupAddrInfo(const std::string& host, const std::string& port) {
+  struct addrinfo  h;
+  memset(&h, 0, sizeof(h));
+  h.ai_family   = AF_UNSPEC;
+  h.ai_socktype = SOCK_STREAM;
+
+  struct addrinfo* addrs = 0;
+  switch (getaddrinfo(host.c_str(), port.empty() ? 0 : port.c_str(), &h, &addrs)) {
+  case 0:              return addrs;
+  case EAI_ADDRFAMILY: throw std::runtime_error("Cannot make socket connection to " + host + ":" + port);
+  case EAI_AGAIN:      throw std::runtime_error(host + ":" + port + " is temporarily unavailable");
+  case EAI_FAIL:       throw std::runtime_error("Failed to resolve hostname: " + host);
+  case EAI_SYSTEM:     throw std::runtime_error("Error while trying to resolve " + host + ":" + port + " (" + std::string(strerror(errno)) + ")");
+  case EAI_NONAME:     throw std::runtime_error("Failed to resolve " + host + ":" + port);
+  case EAI_SERVICE:    throw std::runtime_error("Failed to resolve service: " + port);
+  default:             throw std::runtime_error("Unknown error while trying to resolve " + host + ":" + port);
   }
-
-  fd_set wd;
-  FD_ZERO(&wd);
-  FD_SET(s, &wd);
-
-  if (select(s + 1, 0, &wd, 0, 0) == -1) {
-    std::ostringstream ss;
-    ss << "Failed to connect socket while waiting for writeability: " << strerror(errno) << std::flush;
-    close(s);
-    throw std::runtime_error(ss.str());
-  }
-
-  return s;
+  return 0;
 }
 
-inline int makeConnection(const hostent& host, int port) {
-  int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (s == -1) {
-    throw std::runtime_error("Unable to allocate socket: " + std::string(strerror(errno)));
+inline int makeConnection(const std::string& localAddr, const std::string& host, const std::string& port) {
+  struct addrinfo* localAddrs = localAddr.empty() ? 0 : lookupAddrInfo(localAddr, "");
+  struct addrinfo* addrs      = lookupAddrInfo(host, port);
+
+  for (auto p = addrs; p != 0; p = p->ai_next) {
+    int s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (s == -1) continue;
+
+    auto la = localAddrs;
+    for (; la != 0; la = la->ai_next) {
+      if (la->ai_family == p->ai_family && la->ai_socktype == p->ai_socktype && la->ai_protocol == p->ai_protocol) {
+        if (bind(s, la->ai_addr, la->ai_addrlen) != -1) {
+          break;
+        }
+      }
+    }
+    if (la == 0 && localAddrs != 0) continue;
+
+    if (connect(s, p->ai_addr, p->ai_addrlen) == -1) {
+      close(s);
+    } else {
+      freeaddrinfo(addrs);
+      return s;
+    }
   }
 
-  sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr   = *((in_addr*)(host.h_addr_list[0]));
-  addr.sin_port   = htons(port);
-
-  return makeConnection(s, (sockaddr*)&addr, sizeof(addr));
-}
-
-inline int makeConnection(const std::string& host, size_t port) {
-  if (const hostent* h = (host.size() > 0 && std::isdigit(host[0]) != 0) ? gethostbyaddr(host.c_str(), host.size(), AF_INET) : gethostbyname(host.c_str())) {
-    return makeConnection(*h, port);
-  } else {
-    throw std::runtime_error("Unable to resolve host: " + host);
-  }
+  std::string e = "Cannot connect to " + host + ":" + port + " (" + std::string(strerror(errno)) + ")";
+  freeaddrinfo(addrs);
+  freeaddrinfo(localAddrs);
+  throw std::runtime_error(e);
 }
 
 inline int makeConnection(const std::string& host, const std::string& port) {
-  std::istringstream ss(port);
-  size_t p = 0;
-  ss >> p;
-  if (ss) {
-    return makeConnection(host, p);
-  } else {
-    struct servent* s = getservbyname(port.c_str(), "tcp");
-    if (s != 0) {
-      return makeConnection(host, ntohs(s->s_port));
-    } else {
-      throw std::runtime_error("Failed to resolve port name: " + port);
-    }
-  }
+  return makeConnection("", host, port);
+}
+
+inline int makeConnection(const std::string& localAddr, const std::string& host, size_t port) {
+  std::ostringstream ss;
+  ss << port;
+  return makeConnection(localAddr, host, ss.str());
+}
+
+inline int makeConnection(const std::string& host, size_t port) {
+  return makeConnection("", host, port);
 }
 
 inline int makeConnection(const std::string& hostport) {
@@ -224,42 +229,42 @@ inline int makeConnection(const std::string& hostport) {
 }
 
 // very basic macro metaprogramming
-#define _HNET_FIRST(a, ...) a
-#define _HNET_SECOND(a, b, ...) b
-#define _HNET_JOIN(a,b) a ## b
-#define _HNET_IS_NEGATE(...) _HNET_SECOND(__VA_ARGS__, 0)
-#define _HNET_NOT(x) _HNET_IS_NEGATE(_HNET_JOIN(_HNET__NOT_, x))
-#define _HNET__NOT_0 NEGATE, 1
-#define _HNET_BOOL(x) _HNET_NOT(_HNET_NOT(x))
-#define _HNET_IF_ELSE(condition) _HNET__IF_ELSE(_HNET_BOOL(condition))
-#define _HNET__IF_ELSE(condition) _HNET_JOIN(_HNET__IF_, condition)
-#define _HNET__IF_1(...) __VA_ARGS__ _HNET__IF_1_ELSE
-#define _HNET__IF_0(...)             _HNET__IF_0_ELSE
-#define _HNET__IF_1_ELSE(...)
-#define _HNET__IF_0_ELSE(...) __VA_ARGS__
-#define _HNET_EMPTY()
-#define _HNET_EVAL(...) _HNET_EVAL256(__VA_ARGS__)
-#define _HNET_EVAL256(...) _HNET_EVAL128(_HNET_EVAL128(__VA_ARGS__))
-#define _HNET_EVAL128(...) _HNET_EVAL64(_HNET_EVAL64(__VA_ARGS__))
-#define _HNET_EVAL64(...) _HNET_EVAL32(_HNET_EVAL32(__VA_ARGS__))
-#define _HNET_EVAL32(...) _HNET_EVAL16(_HNET_EVAL16(__VA_ARGS__))
-#define _HNET_EVAL16(...) _HNET_EVAL8(_HNET_EVAL8(__VA_ARGS__))
-#define _HNET_EVAL8(...) _HNET_EVAL4(_HNET_EVAL4(__VA_ARGS__))
-#define _HNET_EVAL4(...) _HNET_EVAL2(_HNET_EVAL2(__VA_ARGS__))
-#define _HNET_EVAL2(...) _HNET_EVAL1(_HNET_EVAL1(__VA_ARGS__))
-#define _HNET_EVAL1(...) __VA_ARGS__
-#define _HNET_DEFER2(m) m _HNET_EMPTY _HNET_EMPTY()()
-#define _HNET_HAS_PARGS(...) _HNET_BOOL(_HNET_FIRST(_HNET__EOAP_ __VA_ARGS__)())
-#define _HNET__EOAP_(...) _HNET_BOOL(_HNET_FIRST(_HNET__EOA_ __VA_ARGS__)())
-#define _HNET__EOA_() 0
-#define _HNET_MAP(f, VS...) _HNET_EVAL(_HNET_MAPP(f, VS))
-#define _HNET_MAPP(f, H, T...)        \
+#define PRIV_HNET_FIRST(a, ...) a
+#define PRIV_HNET_SECOND(a, b, ...) b
+#define PRIV_HNET_JOIN(a,b) a ## b
+#define PRIV_HNET_IS_NEGATE(...) PRIV_HNET_SECOND(__VA_ARGS__, 0)
+#define PRIV_HNET_NOT(x) PRIV_HNET_IS_NEGATE(PRIV_HNET_JOIN(PRIV_HNET_SNOT_, x))
+#define PRIV_HNET_SNOT_0 NEGATE, 1
+#define PRIV_HNET_BOOL(x) PRIV_HNET_NOT(PRIV_HNET_NOT(x))
+#define PRIV_HNET_IF_ELSE(condition) PRIV_HNET_SIF_ELSE(PRIV_HNET_BOOL(condition))
+#define PRIV_HNET_SIF_ELSE(condition) PRIV_HNET_JOIN(PRIV_HNET_SIF_, condition)
+#define PRIV_HNET_SIF_1(...) __VA_ARGS__ PRIV_HNET_SIF_1_ELSE
+#define PRIV_HNET_SIF_0(...)             PRIV_HNET_SIF_0_ELSE
+#define PRIV_HNET_SIF_1_ELSE(...)
+#define PRIV_HNET_SIF_0_ELSE(...) __VA_ARGS__
+#define PRIV_HNET_EMPTY()
+#define PRIV_HNET_EVAL(...) PRIV_HNET_EVAL256(__VA_ARGS__)
+#define PRIV_HNET_EVAL256(...) PRIV_HNET_EVAL128(PRIV_HNET_EVAL128(__VA_ARGS__))
+#define PRIV_HNET_EVAL128(...) PRIV_HNET_EVAL64(PRIV_HNET_EVAL64(__VA_ARGS__))
+#define PRIV_HNET_EVAL64(...) PRIV_HNET_EVAL32(PRIV_HNET_EVAL32(__VA_ARGS__))
+#define PRIV_HNET_EVAL32(...) PRIV_HNET_EVAL16(PRIV_HNET_EVAL16(__VA_ARGS__))
+#define PRIV_HNET_EVAL16(...) PRIV_HNET_EVAL8(PRIV_HNET_EVAL8(__VA_ARGS__))
+#define PRIV_HNET_EVAL8(...) PRIV_HNET_EVAL4(PRIV_HNET_EVAL4(__VA_ARGS__))
+#define PRIV_HNET_EVAL4(...) PRIV_HNET_EVAL2(PRIV_HNET_EVAL2(__VA_ARGS__))
+#define PRIV_HNET_EVAL2(...) PRIV_HNET_EVAL1(PRIV_HNET_EVAL1(__VA_ARGS__))
+#define PRIV_HNET_EVAL1(...) __VA_ARGS__
+#define PRIV_HNET_DEFER2(m) m PRIV_HNET_EMPTY PRIV_HNET_EMPTY()()
+#define PRIV_HNET_HAS_PARGS(...) PRIV_HNET_BOOL(PRIV_HNET_FIRST(PRIV_HNET_SEOAP_ __VA_ARGS__)())
+#define PRIV_HNET_SEOAP_(...) PRIV_HNET_BOOL(PRIV_HNET_FIRST(PRIV_HNET_SEOA_ __VA_ARGS__)())
+#define PRIV_HNET_SEOA_() 0
+#define PRIV_HNET_MAP(f, VS...) PRIV_HNET_EVAL(PRIV_HNET_MAPP(f, VS))
+#define PRIV_HNET_MAPP(f, H, T...)        \
   f H                                 \
-  _HNET_IF_ELSE(_HNET_HAS_PARGS(T))(  \
-    _HNET_DEFER2(_HNET__MAPP)()(f, T) \
+  PRIV_HNET_IF_ELSE(PRIV_HNET_HAS_PARGS(T))(  \
+    PRIV_HNET_DEFER2(PRIV_HNET_SMAPP)()(f, T) \
   )(                                  \
   )
-#define _HNET__MAPP() _HNET_MAPP
+#define PRIV_HNET_SMAPP() PRIV_HNET_MAPP
 
 /*****************************
  * BEGIN serialization by type / type-family
@@ -269,14 +274,14 @@ template <typename T, typename P = void>
   };
 
 // type serialization
-#define _HNET_TYCTOR_PRIM      ((int)0)
-#define _HNET_TYCTOR_TVAR      ((int)2)
-#define _HNET_TYCTOR_FIXEDARR  ((int)4)
-#define _HNET_TYCTOR_ARR       ((int)5)
-#define _HNET_TYCTOR_VARIANT   ((int)6)
-#define _HNET_TYCTOR_STRUCT    ((int)7)
-#define _HNET_TYCTOR_SIZE      ((int)11)
-#define _HNET_TYCTOR_RECURSIVE ((int)13)
+#define PRIV_HNET_TYCTOR_PRIM      ((int)0)
+#define PRIV_HNET_TYCTOR_TVAR      ((int)2)
+#define PRIV_HNET_TYCTOR_FIXEDARR  ((int)4)
+#define PRIV_HNET_TYCTOR_ARR       ((int)5)
+#define PRIV_HNET_TYCTOR_VARIANT   ((int)6)
+#define PRIV_HNET_TYCTOR_STRUCT    ((int)7)
+#define PRIV_HNET_TYCTOR_SIZE      ((int)11)
+#define PRIV_HNET_TYCTOR_RECURSIVE ((int)13)
 
 template <typename T>
   void w(const T& x, bytes* out) {
@@ -297,13 +302,13 @@ inline void ws(const bytes& x, bytes* out) {
 }
 
 inline void encode_primty(const char* tn, bytes* out) {
-  w(_HNET_TYCTOR_PRIM, out);
+  w(PRIV_HNET_TYCTOR_PRIM, out);
   ws(tn, out);
   w((bool)false, out);
 }
 
 // primitive serialization
-#define _HNET_DEFINE_PRIMTYS(T, n) \
+#define PRIV_HNET_DEFINE_PRIMTYS(T, n) \
   template <> \
     struct io<T> { \
       typedef void can_memcpy; \
@@ -315,20 +320,20 @@ inline void encode_primty(const char* tn, bytes* out) {
       static void prepare(uint8_t* o) { *o = 0; } \
       static bool accum(int s, uint8_t* o, T* x) { *o += recvDataPartial(s, ((uint8_t*)x) + *o, sizeof(T) - *o); return *o == sizeof(T); } \
     }
-_HNET_DEFINE_PRIMTYS(bool,     "bool");
-_HNET_DEFINE_PRIMTYS(uint8_t,  "byte");
-_HNET_DEFINE_PRIMTYS(char,     "char");
-_HNET_DEFINE_PRIMTYS(int16_t,  "short");
-_HNET_DEFINE_PRIMTYS(uint16_t, "short");
-_HNET_DEFINE_PRIMTYS(int32_t,  "int");
-_HNET_DEFINE_PRIMTYS(uint32_t, "int");
-_HNET_DEFINE_PRIMTYS(int64_t,  "long");
-_HNET_DEFINE_PRIMTYS(uint64_t, "long");
-#ifdef __clang__
-_HNET_DEFINE_PRIMTYS(size_t,   "long");
+PRIV_HNET_DEFINE_PRIMTYS(bool,     "bool");
+PRIV_HNET_DEFINE_PRIMTYS(uint8_t,  "byte");
+PRIV_HNET_DEFINE_PRIMTYS(char,     "char");
+PRIV_HNET_DEFINE_PRIMTYS(int16_t,  "short");
+PRIV_HNET_DEFINE_PRIMTYS(uint16_t, "short");
+PRIV_HNET_DEFINE_PRIMTYS(int32_t,  "int");
+PRIV_HNET_DEFINE_PRIMTYS(uint32_t, "int");
+PRIV_HNET_DEFINE_PRIMTYS(int64_t,  "long");
+PRIV_HNET_DEFINE_PRIMTYS(uint64_t, "long");
+#if defined(__APPLE__) && defined(__MACH__)
+PRIV_HNET_DEFINE_PRIMTYS(size_t,   "long");
 #endif
-_HNET_DEFINE_PRIMTYS(float,    "float");
-_HNET_DEFINE_PRIMTYS(double,   "double");
+PRIV_HNET_DEFINE_PRIMTYS(float,    "float");
+PRIV_HNET_DEFINE_PRIMTYS(double,   "double");
 
 template <typename T, typename P = void>
   struct cannot_memcpy {
@@ -339,7 +344,11 @@ template <typename T>
   };
 
 // support unit
-struct unit { unit() { } };
+struct unit {
+  unit() { }
+  bool operator==(const unit&) const { return true; }
+  bool operator< (const unit&) const { return false; }
+};
 
 template <>
   struct io<unit> {
@@ -347,6 +356,10 @@ template <>
     static std::string describe() { return "()"; }
     static void write(int s, const unit&) { }
     static void read(int s, unit*) { }
+
+    typedef uint8_t async_read_state;
+    static void prepare(uint8_t* o) {}
+    static bool accum(int s, uint8_t* o, unit* x) { return true; }
   };
 
 // support enumerations
@@ -365,7 +378,7 @@ template <>
   struct T { \
     typedef void is_hnet_enum; \
     enum class Enum : uint32_t { \
-      _HNET_MAP(HNET_ENUM_CTOR_DEF, CTORS) \
+      PRIV_HNET_MAP(HNET_ENUM_CTOR_DEF, CTORS) \
       COUNT \
     }; \
     Enum value; \
@@ -374,21 +387,21 @@ template <>
     T& operator=(Enum v) { this->value = v; return *this; } \
     operator Enum() { return this->value; } \
     typedef T SelfT; \
-    _HNET_MAP(HNET_ENUM_CTOR_CTOR, CTORS) \
+    PRIV_HNET_MAP(HNET_ENUM_CTOR_CTOR, CTORS) \
     static void encode(::hobbes::net::bytes* out) { \
-      ::hobbes::net::w(_HNET_TYCTOR_VARIANT, out); \
-      ::hobbes::net::w((size_t)(0 _HNET_MAP(HNET_ENUM_CTORC_SUCC, CTORS)), out); \
-      _HNET_MAP(HNET_ENUM_CTOR_ENCODE, CTORS); \
+      ::hobbes::net::w(PRIV_HNET_TYCTOR_VARIANT, out); \
+      ::hobbes::net::w((size_t)(0 PRIV_HNET_MAP(HNET_ENUM_CTORC_SUCC, CTORS)), out); \
+      PRIV_HNET_MAP(HNET_ENUM_CTOR_ENCODE, CTORS); \
     } \
     static std::string describe() { \
-      return (std::string("") _HNET_MAP(HNET_ENUM_CTOR_STR, CTORS)).substr(1); \
+      return (std::string("") PRIV_HNET_MAP(HNET_ENUM_CTOR_STR, CTORS)).substr(1); \
     } \
     bool operator==(const T& rhs) const { return this->value == rhs.value; } \
   }; \
   inline std::ostream& operator<<(std::ostream& o, const T& x) { \
     typedef T SelfT; \
     switch (x.value) { \
-    _HNET_MAP(HNET_ENUM_TOSTR_CASE, CTORS) \
+    PRIV_HNET_MAP(HNET_ENUM_TOSTR_CASE, CTORS) \
     default: \
       o << "|?|"; \
       break; \
@@ -447,7 +460,7 @@ template <typename T>
       return *this; \
     } \
     static void encode(::hobbes::net::bytes* out) { \
-      ::hobbes::net::w(_HNET_TYCTOR_VARIANT, out); \
+      ::hobbes::net::w(PRIV_HNET_TYCTOR_VARIANT, out); \
       ::hobbes::net::w((size_t)(0 CTORCOUNT), out); \
       VENCODE; \
     } \
@@ -537,7 +550,7 @@ template <typename T>
 #define HNET_VARIANT_WRITE_CASE(n, t) case Enum::tag_##n: ::hobbes::net::io<int>::write(s, (int)this->tag); ::hobbes::net::io< t >::write(s, this->n##_data); break;
 #define HNET_VARIANT_READ_CASE(n, t)  case Enum::tag_##n: new (this->data) t(); ::hobbes::net::io< t >::read(s, &this->n##_data); break;
 #define HNET_VARIANT_PCOPY(n, t)      case Enum::tag_##n: new (this->data) t(rhs.n##_data); break;
-#define HNET_VARIANT_PDESTROY(n, t)   case Enum::tag_##n: { typedef t __DT; ((__DT*)&this->n##_data)->~__DT(); } break;
+#define HNET_VARIANT_PDESTROY(n, t)   case Enum::tag_##n: { typedef t PRIV_DT; ((PRIV_DT*)&this->n##_data)->~PRIV_DT(); } break;
 #define HNET_VARIANT_SUCC(n, t) +1
 #define HNET_VARIANT_CTOR_OPAQUEDATA(n, t) t n##_data;
 #define HNET_VARIANT_CTOR_ENCODE(n, t)      \
@@ -554,7 +567,7 @@ template <typename T>
 #define HNET_VARIANT_AIOSTATE_ACCUM(n, t) case Enum::tag_##n: return ::hobbes::net::io<t>::accum(s, &o->payloadS.n##_aioS, &x->n##_data);
 
 #define DEFINE_HNET_VARIANT(T, CTORS...) \
-  DEFINE_HNET_VARIANT_GEN(T, _HNET_MAP(HNET_VARIANT_VDECL, CTORS), _HNET_MAP(HNET_VARIANT_CTOR, CTORS), _HNET_MAP(HNET_VARIANT_PCOPY, CTORS), _HNET_MAP(HNET_VARIANT_PDESTROY, CTORS), _HNET_MAP(HNET_VARIANT_SUCC, CTORS), _HNET_MAP(HNET_VARIANT_CTOR_ENCODE, CTORS), _HNET_MAP(HNET_VARIANT_CTOR_STR, CTORS), _HNET_MAP(HNET_VARIANT_WRITE_CASE, CTORS), _HNET_MAP(HNET_VARIANT_READ_CASE, CTORS), _HNET_MAP(HNET_VARIANT_VCASE, CTORS), _HNET_MAP(HNET_VARIANT_EQCASE, CTORS), _HNET_MAP(HNET_VARIANT_CTOR_TAG, CTORS), _HNET_MAP(HNET_VARIANT_CTOR_OPAQUEDATA, CTORS), _HNET_MAP(HNET_VARIANT_AIOSTATE_DATA, CTORS), _HNET_MAP(HNET_VARIANT_AIOSTATE_INIT, CTORS), _HNET_MAP(HNET_VARIANT_AIOSTATE_ACCUM, CTORS))
+  DEFINE_HNET_VARIANT_GEN(T, PRIV_HNET_MAP(HNET_VARIANT_VDECL, CTORS), PRIV_HNET_MAP(HNET_VARIANT_CTOR, CTORS), PRIV_HNET_MAP(HNET_VARIANT_PCOPY, CTORS), PRIV_HNET_MAP(HNET_VARIANT_PDESTROY, CTORS), PRIV_HNET_MAP(HNET_VARIANT_SUCC, CTORS), PRIV_HNET_MAP(HNET_VARIANT_CTOR_ENCODE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_CTOR_STR, CTORS), PRIV_HNET_MAP(HNET_VARIANT_WRITE_CASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_READ_CASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_VCASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_EQCASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_CTOR_TAG, CTORS), PRIV_HNET_MAP(HNET_VARIANT_CTOR_OPAQUEDATA, CTORS), PRIV_HNET_MAP(HNET_VARIANT_AIOSTATE_DATA, CTORS), PRIV_HNET_MAP(HNET_VARIANT_AIOSTATE_INIT, CTORS), PRIV_HNET_MAP(HNET_VARIANT_AIOSTATE_ACCUM, CTORS))
 
 // (with explicit ctor names)
 #define HNET_VARIANT_LBL_CTOR(n, lbl, t) static SelfT n(const t & x) { SelfT r; r.tag = Enum::tag_##n; new (r.data) t(x); return r; }
@@ -563,7 +576,7 @@ template <typename T>
 #define HNET_VARIANT_LBL_WRITE_CASE(n, lbl, t) case Enum::tag_##n: ::hobbes::net::io<int>::write(s, (int)this->tag); ::hobbes::net::io< t >::write(s, this->n##_data); break;
 #define HNET_VARIANT_LBL_READ_CASE(n, lbl, t)  case Enum::tag_##n: new (this->data) t(); ::hobbes::net::io< t >::read(s, &this->n##_data); break;
 #define HNET_VARIANT_LBL_PCOPY(n, lbl, t)      case Enum::tag_##n: new (this->data) t(rhs.n##_data); break;
-#define HNET_VARIANT_LBL_PDESTROY(n, lbl, t)   case Enum::tag_##n: { typedef t __DT; ((__DT*)&this->n##_data)->~__DT(); } break;
+#define HNET_VARIANT_LBL_PDESTROY(n, lbl, t)   case Enum::tag_##n: { typedef t PRIV_DT; ((PRIV_DT*)&this->n##_data)->~PRIV_DT(); } break;
 #define HNET_VARIANT_LBL_SUCC(n, lbl, t) +1
 #define HNET_VARIANT_LBL_CTOR_OPAQUEDATA(n, lbl, t) t n##_data;
 #define HNET_VARIANT_LBL_CTOR_ENCODE(n, lbl, t) \
@@ -580,7 +593,7 @@ template <typename T>
 #define HNET_VARIANT_LBL_CTOR_AIOSTATE_ACCUM(n, lbl, t) case Enum::tag_##n: return ::hobbes::net::io<t>::accum(s, &o->payloadS.n##_aioS, &x->n##_data);
 
 #define DEFINE_HNET_VARIANT_WITH_LABELS(T, CTORS...) \
-  DEFINE_HNET_VARIANT_GEN(T, _HNET_MAP(HNET_VARIANT_LBL_VDECL, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR, CTORS), _HNET_MAP(HNET_VARIANT_LBL_PCOPY, CTORS), _HNET_MAP(HNET_VARIANT_LBL_PDESTROY, CTORS), _HNET_MAP(HNET_VARIANT_LBL_SUCC, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_ENCODE, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_STR, CTORS), _HNET_MAP(HNET_VARIANT_LBL_WRITE_CASE, CTORS), _HNET_MAP(HNET_VARIANT_LBL_READ_CASE, CTORS), _HNET_MAP(HNET_VARIANT_LBL_VCASE, CTORS), _HNET_MAP(HNET_VARIANT_LBL_EQCASE, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_TAG, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_OPAQUEDATA, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_DATA, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_INIT, CTORS), _HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_ACCUM, CTORS))
+  DEFINE_HNET_VARIANT_GEN(T, PRIV_HNET_MAP(HNET_VARIANT_LBL_VDECL, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_PCOPY, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_PDESTROY, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_SUCC, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_ENCODE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_STR, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_WRITE_CASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_READ_CASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_VCASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_EQCASE, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_TAG, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_OPAQUEDATA, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_DATA, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_INIT, CTORS), PRIV_HNET_MAP(HNET_VARIANT_LBL_CTOR_AIOSTATE_ACCUM, CTORS))
 
 template <typename T>
   struct io<T, typename T::is_hnet_variant> {
@@ -599,7 +612,7 @@ template <typename T>
 template <typename U, typename V>
   struct io<std::pair<U,V>> {
     static void encode(bytes* out) {
-      w(_HNET_TYCTOR_STRUCT, out);
+      w(PRIV_HNET_TYCTOR_STRUCT, out);
       w((size_t)2, out);
       
       ws(".f0", out);
@@ -655,7 +668,7 @@ template <typename U, typename V>
 // support vectors of mem-copyable type
 template <typename T>
   struct io<std::vector<T>, typename io<T>::can_memcpy> {
-    static void encode(bytes* out) { w(_HNET_TYCTOR_ARR, out); io<T>::encode(out); }
+    static void encode(bytes* out) { w(PRIV_HNET_TYCTOR_ARR, out); io<T>::encode(out); }
     static std::string describe() { return "[" + io<T>::describe() + "]"; }
     static void write(int s, const std::vector<T>& x) { size_t n = x.size(); io<size_t>::write(s, n); if (n > 0) sendData(s, (const uint8_t*)&x[0], sizeof(T) * n); }
     static void read(int s, std::vector<T>* x) { size_t n = 0; io<size_t>::read(s, &n); x->resize(n); if (n > 0) recvData(s, (uint8_t*)&(*x)[0], n); }
@@ -693,7 +706,7 @@ template <typename T>
 
 template <typename T>
   struct io<std::vector<T>, typename cannot_memcpy<T>::type> {
-    static void encode(bytes* out) { w(_HNET_TYCTOR_ARR, out); io<T>::encode(out); }
+    static void encode(bytes* out) { w(PRIV_HNET_TYCTOR_ARR, out); io<T>::encode(out); }
     static std::string describe() { return "[" + io<T>::describe() + "]"; }
     static void write(int s, const std::vector<T>& x) {
       size_t n = x.size();
@@ -818,13 +831,13 @@ template <typename K, typename T>
 // support strings (but const char* can only be sent, not received)
 template <>
   struct io<const char*> {
-    static void encode(bytes* out) { w(_HNET_TYCTOR_ARR, out); io<char>::encode(out); }
+    static void encode(bytes* out) { w(PRIV_HNET_TYCTOR_ARR, out); io<char>::encode(out); }
     static std::string describe() { return "[char]"; }
     static void write(int s, const char* x) { size_t n = strlen(x); io<size_t>::write(s, n); sendData(s, (const uint8_t*)x, n); }
   };
 template <>
   struct io<std::string> {
-    static void encode(bytes* out) { w(_HNET_TYCTOR_ARR, out); io<char>::encode(out); }
+    static void encode(bytes* out) { w(PRIV_HNET_TYCTOR_ARR, out); io<char>::encode(out); }
     static std::string describe() { return "[char]"; }
     static void write(int s, const std::string& x) { io<size_t>::write(s, x.size()); sendData(s, (const uint8_t*)x.data(), x.size()); }
     static void read(int s, std::string* x) { size_t n = 0; io<size_t>::read(s, &n); x->resize(n); recvData(s, (uint8_t*)x->data(), n); }
@@ -861,17 +874,18 @@ template <>
 
 // support standard, reflective structs
 #define HNET_FIELDC_SUCC(t,n) +1
-#define HNET_FIELD_COUNT(FIELDS...) (0 _HNET_MAP(HNET_FIELDC_SUCC, FIELDS))
+#define HNET_FIELD_COUNT(FIELDS...) (0 PRIV_HNET_MAP(HNET_FIELDC_SUCC, FIELDS))
 
 #define HNET_FIELDW_SUCC(t,n) ::hobbes::net::io< t >::write(s, this-> n);
-#define HNET_FIELD_WRITES(FIELDS...) _HNET_MAP(HNET_FIELDW_SUCC, FIELDS)
+#define HNET_FIELD_WRITES(FIELDS...) PRIV_HNET_MAP(HNET_FIELDW_SUCC, FIELDS)
 
 #define HNET_FIELDR_SUCC(t,n) ::hobbes::net::io< t >::read(s, &this-> n);
-#define HNET_FIELD_READS(FIELDS...) _HNET_MAP(HNET_FIELDR_SUCC, FIELDS)
+#define HNET_FIELD_READS(FIELDS...) PRIV_HNET_MAP(HNET_FIELDR_SUCC, FIELDS)
 
 #define HNET_STRUCT_FIELD(t, n) t n;
 #define HNET_STRUCT_FIELD_ENC(t, n) ::hobbes::net::ws(#n, out); ::hobbes::net::w((int)-1, out); ::hobbes::net::io< t >::encode(out);
 #define HNET_STRUCT_FIELD_DESC(t, n) + (", " #n " : " + ::hobbes::net::io< t >::describe())
+#define HNET_STRUCT_FIELD_EQ(t, n) && this->n == rhs.n
 
 #define HNET_FIELD_ASYNC_READ_IDX_DEF(_, n) readAt_##n,
 #define HNET_FIELD_ASYNC_READ_STATE_DEC(t, n) ::hobbes::net::io< t >::async_read_state n;
@@ -880,20 +894,20 @@ template <>
 
 #define DEFINE_HNET_STRUCT(T, FIELDS...) \
   struct T { \
-    _HNET_MAP(HNET_STRUCT_FIELD, FIELDS) /* struct fields */ \
+    PRIV_HNET_MAP(HNET_STRUCT_FIELD, FIELDS) /* struct fields */ \
     typedef void is_hnet_struct; /* identify this type as a struct */ \
     static void encode(::hobbes::net::bytes* out) { \
       size_t arity = HNET_FIELD_COUNT(FIELDS); \
       if (arity > 0) { \
-        ::hobbes::net::w(_HNET_TYCTOR_STRUCT, out); \
+        ::hobbes::net::w(PRIV_HNET_TYCTOR_STRUCT, out); \
         ::hobbes::net::w(arity, out); \
-        _HNET_MAP(HNET_STRUCT_FIELD_ENC, FIELDS) \
+        PRIV_HNET_MAP(HNET_STRUCT_FIELD_ENC, FIELDS) \
       } else { \
         ::hobbes::net::encode_primty("unit", out); \
       } \
     } \
     static std::string describe() { \
-      return "{" + ( std::string("") _HNET_MAP(HNET_STRUCT_FIELD_DESC, FIELDS) ).substr(2) + "}"; \
+      return "{" + ( std::string("") PRIV_HNET_MAP(HNET_STRUCT_FIELD_DESC, FIELDS) ).substr(2) + "}"; \
     } \
     void write(int s) const { \
       HNET_FIELD_WRITES(FIELDS); \
@@ -901,28 +915,31 @@ template <>
     void read(int s) { \
       HNET_FIELD_READS(FIELDS); \
     } \
+    bool operator==(const T& rhs) const { \
+      return true PRIV_HNET_MAP(HNET_STRUCT_FIELD_EQ, FIELDS); \
+    } \
     /* async reading */ \
     enum class FieldIndex : uint32_t { \
-      _ZeroInit = 0, \
-      _HNET_MAP(HNET_FIELD_ASYNC_READ_IDX_DEF, FIELDS) \
-      _FieldListEnd \
+      PRIV_ZeroInit = 0, \
+      PRIV_HNET_MAP(HNET_FIELD_ASYNC_READ_IDX_DEF, FIELDS) \
+      PRIV_FieldListEnd \
     }; \
     struct async_read_state { \
       FieldIndex idx; \
       struct { \
-      _HNET_MAP(HNET_FIELD_ASYNC_READ_STATE_DEC, FIELDS) \
+      PRIV_HNET_MAP(HNET_FIELD_ASYNC_READ_STATE_DEC, FIELDS) \
       } fieldStates; \
     }; \
     static void prepare(async_read_state* o) { \
       o->idx = (FieldIndex)1; \
-      _HNET_MAP(HNET_FIELD_ASYNC_READ_STATE_INIT, FIELDS) \
+      PRIV_HNET_MAP(HNET_FIELD_ASYNC_READ_STATE_INIT, FIELDS) \
     } \
     static bool accum(int s, async_read_state* o, T* x) { \
       switch (o->idx) { \
-      _HNET_MAP(HNET_FIELD_ASYNC_READ_FIELD, FIELDS) \
+      PRIV_HNET_MAP(HNET_FIELD_ASYNC_READ_FIELD, FIELDS) \
       default: break; \
       } \
-      return o->idx == FieldIndex::_FieldListEnd; \
+      return o->idx == FieldIndex::PRIV_FieldListEnd; \
     } \
   }
 
@@ -1035,7 +1052,7 @@ template <typename ... Ts>
       size_t arity = oSeq<Ts...>::count;
 
       if (arity > 0) {
-        w(_HNET_TYCTOR_STRUCT, out);
+        w(PRIV_HNET_TYCTOR_STRUCT, out);
         w(arity, out);
         oSeq<Ts...>::encode(0, out);
       } else {
@@ -1065,22 +1082,23 @@ template <typename ... Ts>
   };
 
 // support opaque type aliases
-#define DEFINE_HNET_TYPE_ALIAS(_ATY, _REPTY) \
-  struct _ATY { \
+#define DEFINE_HNET_TYPE_ALIAS(PRIV_ATY, PRIV_REPTY) \
+  struct PRIV_ATY { \
     typedef void is_hnet_alias; \
-    typedef _REPTY type; \
-    static const char* name() { return #_ATY; } \
-    inline operator _REPTY() { return this->value; } \
-    _REPTY value; \
-    _ATY() : value() { } \
-    _ATY(const _REPTY& x) : value(x) { } \
-    _ATY(const _ATY& x) : value(x.value) { } \
-    _ATY& operator=(const _ATY& x) { this->value = x.value; return *this; } \
+    typedef PRIV_REPTY type; \
+    static const char* name() { return #PRIV_ATY; } \
+    inline operator PRIV_REPTY() { return this->value; } \
+    PRIV_REPTY value; \
+    PRIV_ATY() : value() { } \
+    PRIV_ATY(const PRIV_REPTY& x) : value(x) { } \
+    PRIV_ATY(const PRIV_ATY& x) : value(x.value) { } \
+    PRIV_ATY& operator=(const PRIV_ATY& x) { this->value = x.value; return *this; } \
+    bool operator==(const PRIV_ATY& x) const { return this->value == x.value; } \
   }
 
 template <typename T>
   struct io<T, typename T::is_hnet_alias> {
-    static void        encode(bytes* out)          { w(_HNET_TYCTOR_PRIM, out); ws(T::name(), out); w((bool)true, out); io<typename T::type>::encode(out); }
+    static void        encode(bytes* out)          { w(PRIV_HNET_TYCTOR_PRIM, out); ws(T::name(), out); w((bool)true, out); io<typename T::type>::encode(out); }
     static std::string describe()                  { return T::name(); }
     static void        write(int s, const T& x)    { io<typename T::type>::write(s, x.value); }
     static void        read(int s, T* x)           { io<typename T::type>::read(s, &x->value); }
@@ -1148,36 +1166,40 @@ template <typename ... Args>
     uint32_t exprid;
   };
 
-#define _HNET_CLIENT_MAKE_EXPRID(n, _, __) , exprID_##n
-#define _HNET_CLIENT_MAKE_RPCDEF(n, t, e) result.push_back(::hobbes::net::RPCDef((uint32_t)exprID_##n, e, ::hobbes::net::RPCTyDef<t>::inputType(), ::hobbes::net::RPCTyDef<t>::outputType()));
-#define _HNET_CLIENT_INIT_RPCFUNC(n, t, _) , n(&this->s, (uint32_t)exprID_##n)
-#define _HNET_CLIENT_MAKE_RPCFUNC(n, t, _) ::hobbes::net::RPCFunc<t> n;
+#define PRIV_HNET_CLIENT_MAKE_EXPRID(n, _, __) , exprID_##n
+#define PRIV_HNET_CLIENT_MAKE_RPCDEF(n, t, e) result.push_back(::hobbes::net::RPCDef((uint32_t)exprID_##n, e, ::hobbes::net::RPCTyDef<t>::inputType(), ::hobbes::net::RPCTyDef<t>::outputType()));
+#define PRIV_HNET_CLIENT_INIT_RPCFUNC(n, t, _) , n(&this->s, (uint32_t)exprID_##n)
+#define PRIV_HNET_CLIENT_MAKE_RPCFUNC(n, t, _) ::hobbes::net::RPCFunc<t> n;
 
 #define DEFINE_NET_CLIENT(T, C...) \
   class T { \
   private: \
     int s; \
   public: \
-    T(int fd) : s(::hobbes::net::initSession(fd, makeRPCDefs())) _HNET_MAP(_HNET_CLIENT_INIT_RPCFUNC, C) { } \
+    T(int fd) : s(::hobbes::net::initSession(fd, makeRPCDefs())) PRIV_HNET_MAP(PRIV_HNET_CLIENT_INIT_RPCFUNC, C) { } \
     T(const std::string& host, size_t port) : T(::hobbes::net::makeConnection(host, port)) { } \
     T(const std::string& host, const std::string& port) : T(::hobbes::net::makeConnection(host, port)) { } \
+    T(const std::string& localAddr, const std::string& host, size_t port) : T(::hobbes::net::makeConnection(localAddr, host, port)) { } \
+    T(const std::string& localAddr, const std::string& host, const std::string& port) : T(::hobbes::net::makeConnection(localAddr, host, port)) { } \
     T(const std::string& hostport) : T(::hobbes::net::makeConnection(hostport)) { } \
     virtual ~T() { closeC(); } \
     int fd() const { return this->s; } \
     void reconnect(int fd) { closeC(); this->s = ::hobbes::net::initSession(fd, makeRPCDefs()); } \
     void reconnect(const std::string& host, size_t port) { reconnect(::hobbes::net::makeConnection(host, port)); } \
     void reconnect(const std::string& host, const std::string& port) { reconnect(::hobbes::net::makeConnection(host, port)); } \
+    void reconnect(const std::string& localAddr, const std::string& host, size_t port) { reconnect(::hobbes::net::makeConnection(localAddr, host, port)); } \
+    void reconnect(const std::string& localAddr, const std::string& host, const std::string& port) { reconnect(::hobbes::net::makeConnection(localAddr, host, port)); } \
     void reconnect(const std::string& hostport) { reconnect(::hobbes::net::makeConnection(hostport)); } \
     \
-    _HNET_MAP(_HNET_CLIENT_MAKE_RPCFUNC, C) \
+    PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_RPCFUNC, C) \
   private: \
     enum ExprIDs { \
       NullExpr = 0 \
-      _HNET_MAP(_HNET_CLIENT_MAKE_EXPRID, C) \
+      PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_EXPRID, C) \
     }; \
     static ::hobbes::net::RPCDefs makeRPCDefs() { \
       ::hobbes::net::RPCDefs result; \
-      _HNET_MAP(_HNET_CLIENT_MAKE_RPCDEF, C) \
+      PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_RPCDEF, C) \
       return result; \
     } \
     void closeC() { \
@@ -1261,36 +1283,40 @@ template <typename ... Args>
     uint32_t exprid;
   };
 
-#define _HNET_CLIENT_INIT_ASYNC_RPCFUNC(n, t, _) , n(this, &this->s, (uint32_t)exprID_##n)
-#define _HNET_CLIENT_MAKE_ASYNC_RPCFUNC(n, t, _) ::hobbes::net::AsyncRPCFunc<t> n;
+#define PRIV_HNET_CLIENT_INIT_ASYNC_RPCFUNC(n, t, _) , n(this, &this->s, (uint32_t)exprID_##n)
+#define PRIV_HNET_CLIENT_MAKE_ASYNC_RPCFUNC(n, t, _) ::hobbes::net::AsyncRPCFunc<t> n;
 
 #define DEFINE_ASYNC_NET_CLIENT(T, C...) \
   class T : public ::hobbes::net::AsyncScheduler { \
   private: \
     int s; \
   public: \
-    T(int fd) : s(::hobbes::net::initSession(fd, makeRPCDefs())) _HNET_MAP(_HNET_CLIENT_INIT_ASYNC_RPCFUNC, C) { } \
+    T(int fd) : s(::hobbes::net::initSession(fd, makeRPCDefs())) PRIV_HNET_MAP(PRIV_HNET_CLIENT_INIT_ASYNC_RPCFUNC, C) { } \
     T(const std::string& host, size_t port) : T(::hobbes::net::makeConnection(host, port)) { } \
     T(const std::string& host, const std::string& port) : T(::hobbes::net::makeConnection(host, port)) { } \
+    T(const std::string& localAddr, const std::string& host, size_t port) : T(::hobbes::net::makeConnection(localAddr, host, port)) { } \
+    T(const std::string& localAddr, const std::string& host, const std::string& port) : T(::hobbes::net::makeConnection(localAddr, host, port)) { } \
     T(const std::string& hostport) : T(::hobbes::net::makeConnection(hostport)) { } \
     virtual ~T() { closeC(); } \
     int fd() const { return this->s; } \
     void reconnect(int fd) { closeC(); this->s = ::hobbes::net::initSession(fd, makeRPCDefs()); } \
     void reconnect(const std::string& host, size_t port) { reconnect(::hobbes::net::makeConnection(host, port)); } \
     void reconnect(const std::string& host, const std::string& port) { reconnect(::hobbes::net::makeConnection(host, port)); } \
+    void reconnect(const std::string& localAddr, const std::string& host, size_t port) { reconnect(::hobbes::net::makeConnection(localAddr, host, port)); } \
+    void reconnect(const std::string& localAddr, const std::string& host, const std::string& port) { reconnect(::hobbes::net::makeConnection(localAddr, host, port)); } \
     void reconnect(const std::string& hostport) { reconnect(::hobbes::net::makeConnection(hostport)); } \
     void step() { while (this->asyncReaders.size() > 0 && this->asyncReaders.front()->readAndFinish()) { this->asyncReaders.pop(); } } \
     size_t pendingRequests() const { return this->asyncReaders.size(); } \
     \
-    _HNET_MAP(_HNET_CLIENT_MAKE_ASYNC_RPCFUNC, C) \
+    PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_ASYNC_RPCFUNC, C) \
   private: \
     enum ExprIDs { \
       NullExpr = 0 \
-      _HNET_MAP(_HNET_CLIENT_MAKE_EXPRID, C) \
+      PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_EXPRID, C) \
     }; \
     static ::hobbes::net::RPCDefs makeRPCDefs() { \
       ::hobbes::net::RPCDefs result; \
-      _HNET_MAP(_HNET_CLIENT_MAKE_RPCDEF, C) \
+      PRIV_HNET_MAP(PRIV_HNET_CLIENT_MAKE_RPCDEF, C) \
       return result; \
     } \
     std::queue<::hobbes::net::AsyncReader*> asyncReaders; \
