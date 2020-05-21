@@ -1080,7 +1080,7 @@ Record::Members consMember(const std::string& lbl, const MonoTypePtr& hty, const
   } else {
     r = tty;
     r[slot].field = lbl;
-    r[slot].type  = hty;
+    // r[slot].type  = hty;
   }
   resetFieldOffsets(&r);
   return r;
