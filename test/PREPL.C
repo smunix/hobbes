@@ -42,8 +42,6 @@ std::string exprTEnv() {
   return ss.str();
 }
 
-#if 0
-// FIXME : salumup : flaky tests failing with "Unable to launch process: ./hi-g -z"
 TEST(PREPL, EvalBasicExprs) {
   EXPECT_EQ(exprEval("1+1"), "2");
   EXPECT_TRUE(exprEval("undefinedVariableNameForTest").find("undefinedVariableNameForTest") != std::string::npos);
@@ -60,4 +58,3 @@ TEST(PREPL, Typeof) {
 TEST(PREPL, TEnvWithoutHiddenTCs) {
   EXPECT_TRUE(exprTEnv().find(".genc.") == std::string::npos);
 }
-#endif
