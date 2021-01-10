@@ -144,7 +144,10 @@ public:
     }
 
     // it's a standard function call, invoke it in the standard way
-    return fncall(builder(), compile(v->fn()), compileArgs(this->c, v->args()));
+    return fncall(builder(),
+                  compile(v->fn()),
+                  toLLVM(requireMonotype(this->c->typeEnv(), v->fn())),
+                  compileArgs(this->c, v->args()));
   }
 
   llvm::Value* with(const Assign* v) const {
@@ -369,7 +372,7 @@ public:
     auto ltxt  = ltxts.size() > 0 ? ltxts[0] : "???";
 
     builder()->SetInsertPoint(failBlock);
-    fncall(builder(), f, list(
+    fncall(builder(), f, f->getFunctionType(), list(
       this->c->internConstString(v->la().filename()),
       cvalue(scast<long>(v->la().p0.first)),
       this->c->internConstString(ltxt),

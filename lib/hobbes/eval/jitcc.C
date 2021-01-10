@@ -496,7 +496,11 @@ llvm::Value* jitcc::loadConstant(const std::string& vn) {
     if (is<Array>(cv->second.mtype)) {
       return builder()->CreateLoad(refGlobal(vn, cv->second.ref));
     } else if (llvm::Value* r = refGlobal(vn, cv->second.ref)) {
+#if LLVM_VERSION_MAJOR <= 10
       return hasPointerRep(cv->second.mtype) ? r : builder()->CreateLoad(r);
+#elif LLVM_VERSION_MAJOR <= 11
+      return hasPointerRep(cv->second.mtype) ? r : builder()->CreateAlignedLoad(r->getType()->getPointerElementType(), r, llvm::MaybeAlign(8));
+#endif
     } else {
       return cv->second.value;
     }
@@ -790,7 +794,7 @@ void jitcc::unsafeCompileFunctions(UCFS* ufs) {
 llvm::Value* jitcc::compileAllocStmt(llvm::Value* sz, llvm::Value* asz, llvm::Type* mty, bool zeroMem) {
   llvm::Function* f = lookupFunction(zeroMem ? "mallocz" : "malloc");
   if (!f) throw std::runtime_error("Expected heap allocation function as call.");
-  return builder()->CreateBitCast(fncall(builder(), f, list(sz, asz)), mty);
+  return builder()->CreateBitCast(fncall(builder(), f, f->getFunctionType(), list(sz, asz)), mty);
 }
 
 llvm::Value* jitcc::compileAllocStmt(size_t sz, size_t asz, llvm::Type* mty, bool zeroMem) {

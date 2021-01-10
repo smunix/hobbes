@@ -569,7 +569,8 @@ inline llvm::Function* cloneFunction(llvm::Function *f, llvm::Module *targetMod)
   return newF;
 }
 
-inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* vfn, const Values& args) {
+inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* vfn, llvm::Type* tfn, const Values& args) {
+    (void)tfn;
 #if LLVM_VERSION_MINOR >= 6 || LLVM_VERSION_MAJOR == 4 || LLVM_VERSION_MAJOR <= 6
   llvm::Module* thisMod = b->GetInsertBlock()->getParent()->getParent();
 
@@ -586,8 +587,8 @@ inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* vfn, const Values&
 #elif LLVM_VERSION_MAJOR <= 10
   return b->CreateCall(vfn, args);
 #elif LLVM_VERSION_MAJOR <= 11
-  if (auto *fn = llvm::dyn_cast<llvm::Function>(vfn)) {
-      return b->CreateCall(fn->getFunctionType(), fn, args);
+  if (auto *ty = llvm::dyn_cast<llvm::FunctionType>(tfn)) {
+      return b->CreateCall(ty, vfn, args);
   } else {
     throw std::runtime_error("fncall(...) invoked on non-function type (internal error)");
   }
@@ -595,8 +596,14 @@ inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* vfn, const Values&
 #endif
 }
 
+#if 0
 inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* fn, llvm::Value* arg) {
-  return fncall(b, fn, list(arg));
+  return fncall(b, fn, nullptr, list(arg));
+}
+#endif
+
+inline llvm::Value* fncall(llvm::IRBuilder<>* b, llvm::Value* fn, llvm::Type* tfn, llvm::Value* arg) {
+  return fncall(b, fn, tfn, list(arg));
 }
 
 }

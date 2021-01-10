@@ -196,7 +196,7 @@ TEST(Matching, matchFromStringToBoolIsBool) {
     "| \"1\" _ _ _             -> true\n"
     "| _ _ _ _                 -> false"
   )();
-  EXPECT_EQ(1, *reinterpret_cast<uint8_t*>(&r));
+  EXPECT_EQ(uint8_t(0xff), *reinterpret_cast<uint8_t*>(&r));
   EXPECT_TRUE(r);  
 }
 

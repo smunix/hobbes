@@ -27,15 +27,15 @@ void rmrf(const char* p) {
 }
 
 std::string hogBinaryPath() {
-  static char path[PATH_MAX];
   auto p = getenv("HOG_BIN");
   if (p) {
     return p;
   }
   // assuming hog and hobbes-test are in the same folder
-  if (getcwd(path, sizeof(path))) {
-    strcat(path, "/hog");
-  }
+  std::string path;
+  execPath([&path](std::string const& ep) mutable {
+    path = ep + "/hog";
+  });
   return path;
 }
 
