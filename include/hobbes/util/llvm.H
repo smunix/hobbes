@@ -179,7 +179,7 @@ inline llvm::Constant* ccast(llvm::Type* ty, llvm::Constant* v) {
 
 // constant utilities
 inline llvm::Constant* cvalue(bool x) {
-  return llvm::Constant::getIntegerValue(boolType(), llvm::APInt(1, x ? 1 : 0, false));
+  return llvm::Constant::getIntegerValue(boolType(), llvm::APInt(8, x ? 1 : 0, false));
 }
 
 inline llvm::Constant* cvalue(char x) {
@@ -220,7 +220,7 @@ inline llvm::Constant* cvalue(double x) {
 
 // constant int utilities (different than constants to LLVM!)
 inline llvm::ConstantInt* civalue(bool x) {
-  return llvm::ConstantInt::get(llvm::IntegerType::get(context(), 1), static_cast<uint64_t>(x ? 1 : 0));
+  return llvm::ConstantInt::get(llvm::IntegerType::get(context(), 8), static_cast<uint64_t>(x ? 1 : 0));
 }
 
 inline llvm::ConstantInt* civalue(char x) {
