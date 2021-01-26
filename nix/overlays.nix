@@ -67,8 +67,11 @@ let
   
   withSHAKE = let
     llvmPkgs = { llvmVersion }: final."llvmPackages_${toString llvmVersion}";
+    gccPkgs = { gccVersion ? 10 }: final."gcc${toString gccVersion}Stdenv";
   in makeOverridable
     ({ llvmVersion
+     , gccVersion
+     , platform 
      , ncurses ? final.ncurses
      , zlib ? final.zlib
      , readline ? final.readline
@@ -83,7 +86,14 @@ let
          inherit version src meta;
          shakeBuild = (with haskellPackages; with (llvmPkgs { inherit llvmVersion; });
            haskell.lib.overrideCabal (callCabal2nix "shakeBuild" "${src}/shake" {
-             inherit shake shake-language-c;
+             inherit
+               shake
+             ;
+             shake-language-c = callPackage (fetchGit {
+               url = "https://github.com/smunix/shake-language-c";
+               rev = "f0b258b9c3cfa56b569cdaf3a61b787c46be3cd6";
+               allRefs = true;
+             }) {};
            }) (old: {
              postPatch = ''
              substituteInPlace Shakefile.hs \
@@ -104,7 +114,7 @@ let
            pkgconfig
            shakeBuild
            cabal-install
-         ] ++ (if stdenv.isDarwin then [ xcbuild ] else []);
+         ] ++ (if platform.isDarwin then [ xcbuild ] else []);
          propagatedBuildInputs = with (llvmPkgs { inherit llvmVersion; }); [
            zlib ncurses readline llvm
            libcxx
@@ -114,11 +124,17 @@ let
          buildPhase = ''
            ${shakeBuild}/bin/shakeBuild +RTS -N
          '';
-         installPhase = ''
-           mkdir -p "$out"/{bin,test}
-           install build/macosx/x86_64/hi-A build/macosx/x86_64/hog-A "$out"/bin
-           install build/macosx/x86_64/hobbes-test-A "$out"/test
-         '';
+         installPhase = if platform.isDarwin
+                        then ''
+                               mkdir -p "$out"/{bin,test}
+                               install build/macosx/x86_64/hi-A build/macosx/x86_64/hog-A "$out"/bin
+                               install build/macosx/x86_64/hobbes-test-A "$out"/test
+                             ''
+                        else ''
+                               mkdir -p "$out"/{bin,test}
+                               install build/linux/x86_64/hi-A build/linux/x86_64/hog-A "$out"/bin
+                               install build/linux/x86_64/hobbes-test-A "$out"/test
+                        '';
        });
   
 in rec {
@@ -145,7 +161,14 @@ in rec {
         (llvmVersion: {
           name = "shake-" + toString llvmVersion;
           value = recurseIntoAttrs ({
-            hobbes = dbg (callPackage withSHAKE { inherit llvmVersion; });
+            hobbes = dbg (callPackage withSHAKE {
+              inherit llvmVersion;
+              gccVersion = 10;
+              platform = {
+                isDarwin = stdenv.isDarwin;
+                isLinux = stdenv.isLinux;
+              };
+            });
           });
         }) llvmVersions))
         ;
